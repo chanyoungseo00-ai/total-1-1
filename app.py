@@ -177,7 +177,7 @@ try:
     mode = st.sidebar.radio("작업 선택", ["대진표 편성", "대회 채점"])
 
     if mode == "대진표 편성":
-        st.title("⛳ 대진표 자동 편성 (이름만 쏙쏙!)")
+        st.title("⛳ 대진표 자동 편성 (명단 스캐너 적용)")
         m_type = st.sidebar.radio("편성 부문", ["개인전", "단체전"])
         h_cnt = st.sidebar.radio("출발홀 수", [6, 7, 8], index=2)
         p_cnt = st.sidebar.radio("조당 인원", [6, 7, 8], index=0)
@@ -192,65 +192,78 @@ try:
                 
                 df_raw = pd.read_excel(up_file, sheet_name=selected_sheet, header=None)
                 
-                # 💡 [엄격한 스캐너] 짐작하지 않고 오직 '이름/성명/선수명'이라는 열만 찾음
+                # 💡 [엄격한 스캐너] 이름/성명 열 제목 찾기
                 header_idx = -1
-                name_col_idx = -1
                 
                 for i, row in df_raw.iterrows():
                     row_str = row.astype(str).str.replace(" ", "").str.replace("\n", "").tolist()
-                    if '이름' in row_str:
+                    if '이름' in row_str or '성명' in row_str or '선수명' in row_str:
                         header_idx = i
-                        name_col_idx = row_str.index('이름')
-                        break
-                    elif '성명' in row_str:
-                        header_idx = i
-                        name_col_idx = row_str.index('성명')
-                        break
-                    elif '선수명' in row_str:
-                        header_idx = i
-                        name_col_idx = row_str.index('선수명')
                         break
                 
                 if header_idx == -1:
                     st.error("❌ 선택하신 시트에서 [이름] 또는 [성명] 항목을 찾을 수 없습니다. 엑셀 파일의 제목줄을 확인해 주세요.")
                 else:
-                    # 정확히 찾은 열에서 이름만 추출
-                    names = df_raw.iloc[header_idx+1:, name_col_idx]
-                    df_clean = pd.DataFrame({'이름': names})
+                    # 열 제목 깔끔하게 정리
+                    raw_cols = df_raw.iloc[header_idx].astype(str).str.replace(" ", "").str.replace("\n", "")
+                    df_raw.columns = raw_cols
+                    df_raw = df_raw.iloc[header_idx+1:].reset_index(drop=True)
                     
-                    # 빈칸, 기호, 찌꺼기 완벽 제거
-                    valid_names = df_clean['이름'].astype(str).str.replace(" ", "")
-                    df_clean = df_clean[(valid_names != 'nan') & (valid_names != 'None') & (valid_names != '')].copy()
+                    # 중복 컬럼명 제거 (오류 방지)
+                    df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
                     
-                    # 내부 조 편성 로직 작동을 위한 더미(가짜) 데이터 삽입
-                    df_clean['지역'] = '일반' 
-                    df_clean['성별'] = '남'
+                    # 제목 통일 (성명 -> 이름, 소속 -> 지역)
+                    if '성명' in df_raw.columns: df_raw = df_raw.rename(columns={'성명': '이름'})
+                    if '선수명' in df_raw.columns: df_raw = df_raw.rename(columns={'선수명': '이름'})
+                    if '소속' in df_raw.columns: df_raw = df_raw.rename(columns={'소속': '지역'})
+                    if '시군구' in df_raw.columns: df_raw = df_raw.rename(columns={'시군구': '지역'})
+                    if '클럽' in df_raw.columns: df_raw = df_raw.rename(columns={'클럽': '지역'})
+                    if '남여' in df_raw.columns: df_raw = df_raw.rename(columns={'남여': '성별'})
                     
-                    st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 [이름/성명] 열에서 정확하게 추출했습니다!")
-                    
-                    # 👀 불러온 이름 명단을 눈으로 직접 확인
-                    with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요"):
-                        st.dataframe(df_clean[['이름']].reset_index(drop=True), use_container_width=True)
-                    
-                    if st.button(f"🚀 {m_type} 대진표 생성 실행"):
-                        res, t_cnt, order_stats = assign_teams_and_orders(df_clean, h_cnt, p_cnt, m_type)
+                    if '이름' not in df_raw.columns:
+                        st.error("❌ [이름] 열을 찾을 수 없습니다.")
+                    else:
+                        # 💡 [핵심] 이름 없는 빈 줄 완벽 제거
+                        df_raw['이름'] = df_raw['이름'].astype(str).str.strip()
+                        df_clean = df_raw[~df_raw['이름'].isin(['nan', 'None', '', 'NaN'])].copy()
                         
-                        # 💡 [출력 깔끔화] 화면 및 엑셀에 출력될 때 더미 지역/성별 데이터는 빈칸으로 싹 지움
-                        res['지역'] = ""
-                        res['성별'] = ""
+                        # 지역 가져오기 (병합 셀 대비 앞사람 지역 복사, 아예 없으면 미기재)
+                        if '지역' in df_clean.columns:
+                            df_clean['지역'] = df_clean['지역'].ffill().fillna('미기재')
+                        else:
+                            df_clean['지역'] = '미기재'
+                            
+                        # 성별 가져오기 (없으면 남자로 기본 지정)
+                        if '성별' not in df_clean.columns:
+                            df_clean['성별'] = '남'
+                        df_clean['성별'] = df_clean['성별'].fillna('남')
                         
-                        st.subheader(f"✅ {m_type} 편성 완료 (총 {t_cnt}개 조)")
+                        df_clean = df_clean[['지역', '이름', '성별']]
                         
-                        # 화면에 보여줄 컬럼 순서 지정 (지역, 성별 숨김)
-                        display_cols = ['진행 그룹', '팀', '구장', '홀', '타순', '이름']
-                        st.dataframe(res[display_cols], use_container_width=True)
+                        st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 누락 없이 완벽하게 불러왔습니다!")
                         
-                        print_excel = create_print_excel(res, m_type, h_cnt)
-                        st.download_button(
-                            label="📥 인쇄용 공식 대진표 다운로드", 
-                            data=print_excel, 
-                            file_name=f"{m_type}_최종_대진표.xlsx"
-                        )
+                        # 👀 불러온 명단을 눈으로 직접 확인 (지역과 이름 나란히 표시)
+                        with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요"):
+                            st.dataframe(df_clean[['지역', '이름']].reset_index(drop=True), use_container_width=True)
+                        
+                        if st.button(f"🚀 {m_type} 대진표 생성 실행"):
+                            res, t_cnt, order_stats = assign_teams_and_orders(df_clean, h_cnt, p_cnt, m_type)
+                            
+                            # 성별은 안 보이게 숨김 처리 (지역과 이름만 보임)
+                            res['성별'] = ""
+                            
+                            st.subheader(f"✅ {m_type} 편성 완료 (총 {t_cnt}개 조)")
+                            
+                            # 화면에 보여줄 컬럼 순서 지정 (지역 포함)
+                            display_cols = ['진행 그룹', '팀', '구장', '홀', '타순', '지역', '이름']
+                            st.dataframe(res[display_cols], use_container_width=True)
+                            
+                            print_excel = create_print_excel(res, m_type, h_cnt)
+                            st.download_button(
+                                label="📥 인쇄용 공식 대진표 다운로드", 
+                                data=print_excel, 
+                                file_name=f"{m_type}_최종_대진표.xlsx"
+                            )
                         
             except Exception as e:
                 st.error(f"엑셀 파일을 처리하는 도중 문제가 발생했습니다: {e}")
