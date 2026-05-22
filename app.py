@@ -10,12 +10,11 @@ st.set_page_config(page_title="그라운드골프 통합 시스템", layout="wid
 
 try:
     # ==========================================
-    # [기능 1] 대진표 자동 편성 로직 (남녀 혼합 추가)
+    # [기능 1] 대진표 자동 편성 로직
     # ==========================================
     def assign_teams_and_orders(df, holes_per_field=8, players_per_team=6, match_type="개인전"):
         working_df = df.copy()
         
-        # 💡 [핵심 수리] 성별에 오타가 있거나 비어있으면 무조건 '남'으로 강제 지정하여 인원 누락 원천 차단
         working_df['성별'] = working_df['성별'].astype(str).str.strip().str[0] 
         working_df['성별'] = working_df['성별'].apply(lambda x: '여' if x == '여' else '남')
         working_df['지역'] = working_df['지역'].astype(str).str.strip()
@@ -178,7 +177,7 @@ try:
     mode = st.sidebar.radio("작업 선택", ["대진표 편성", "대회 채점"])
 
     if mode == "대진표 편성":
-        st.title("⛳ 대진표 자동 편성")
+        st.title("⛳ 대진표 자동 편성 (이름만 쏙쏙!)")
         m_type = st.sidebar.radio("편성 부문", ["개인전", "단체전"])
         h_cnt = st.sidebar.radio("출발홀 수", [6, 7, 8], index=2)
         p_cnt = st.sidebar.radio("조당 인원", [6, 7, 8], index=0)
@@ -192,71 +191,66 @@ try:
                 selected_sheet = st.selectbox("📂 명단이 들어있는 엑셀 시트를 정확히 선택하세요", sheet_names)
                 
                 df_raw = pd.read_excel(up_file, sheet_name=selected_sheet, header=None)
-                header_idx = -1
                 
-                # 헤더(제목줄) 찾기 시 공백 완벽 제거 검사
+                # 💡 [엄격한 스캐너] 짐작하지 않고 오직 '이름/성명/선수명'이라는 열만 찾음
+                header_idx = -1
+                name_col_idx = -1
+                
                 for i, row in df_raw.iterrows():
                     row_str = row.astype(str).str.replace(" ", "").str.replace("\n", "").tolist()
-                    if '이름' in row_str or '성명' in row_str or '선수명' in row_str:
+                    if '이름' in row_str:
                         header_idx = i
+                        name_col_idx = row_str.index('이름')
                         break
-                        
+                    elif '성명' in row_str:
+                        header_idx = i
+                        name_col_idx = row_str.index('성명')
+                        break
+                    elif '선수명' in row_str:
+                        header_idx = i
+                        name_col_idx = row_str.index('선수명')
+                        break
+                
                 if header_idx == -1:
-                    st.error("❌ 선택하신 시트에서 [이름] 또는 [성명] 항목을 찾을 수 없습니다.")
+                    st.error("❌ 선택하신 시트에서 [이름] 또는 [성명] 항목을 찾을 수 없습니다. 엑셀 파일의 제목줄을 확인해 주세요.")
                 else:
-                    raw_cols = df_raw.iloc[header_idx].astype(str).str.replace(" ", "").str.replace("\n", "")
-                    df_raw.columns = raw_cols
-                    df_raw = df_raw.iloc[header_idx+1:].reset_index(drop=True)
+                    # 정확히 찾은 열에서 이름만 추출
+                    names = df_raw.iloc[header_idx+1:, name_col_idx]
+                    df_clean = pd.DataFrame({'이름': names})
                     
-                    # 중복된 컬럼명 제거 (오류 방지)
-                    df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
-                    df_raw = df_raw.rename(columns={'소속': '지역', '시군구': '지역', '클럽': '지역', '성명': '이름', '선수명': '이름', '남여': '성별'})
+                    # 빈칸, 기호, 찌꺼기 완벽 제거
+                    valid_names = df_clean['이름'].astype(str).str.replace(" ", "")
+                    df_clean = df_clean[(valid_names != 'nan') & (valid_names != 'None') & (valid_names != '')].copy()
                     
-                    if '이름' not in df_raw.columns:
-                        st.error("❌ [이름] 열 인식에 실패했습니다.")
-                    else:
-                        # 💡 [핵심 수리] 엑셀에서 셀 병합된 지역 이름 빈칸 채우기 (앞으로 당겨 채우기)
-                        if '지역' in df_raw.columns:
-                            df_raw['지역'] = df_raw['지역'].ffill()
-                        else:
-                            df_raw['지역'] = '미기재'
-                            
-                        if '성별' not in df_raw.columns: df_raw['성별'] = '남'
-                            
-                        # 진짜 이름이 있는 행만 추출
-                        valid_names = df_raw['이름'].astype(str).str.replace(" ", "")
-                        df_clean = df_raw[(valid_names != 'nan') & (valid_names != 'None') & (valid_names != '')].copy()
+                    # 내부 조 편성 로직 작동을 위한 더미(가짜) 데이터 삽입
+                    df_clean['지역'] = '일반' 
+                    df_clean['성별'] = '남'
+                    
+                    st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 [이름/성명] 열에서 정확하게 추출했습니다!")
+                    
+                    # 👀 불러온 이름 명단을 눈으로 직접 확인
+                    with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요"):
+                        st.dataframe(df_clean[['이름']].reset_index(drop=True), use_container_width=True)
+                    
+                    if st.button(f"🚀 {m_type} 대진표 생성 실행"):
+                        res, t_cnt, order_stats = assign_teams_and_orders(df_clean, h_cnt, p_cnt, m_type)
                         
-                        df_clean['지역'] = df_clean['지역'].fillna('미기재')
-                        df_clean['성별'] = df_clean['성별'].fillna('남')
+                        # 💡 [출력 깔끔화] 화면 및 엑셀에 출력될 때 더미 지역/성별 데이터는 빈칸으로 싹 지움
+                        res['지역'] = ""
+                        res['성별'] = ""
                         
-                        df_clean = df_clean[['지역', '이름', '성별']]
+                        st.subheader(f"✅ {m_type} 편성 완료 (총 {t_cnt}개 조)")
                         
-                        st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 완벽하게 불러왔습니다!")
+                        # 화면에 보여줄 컬럼 순서 지정 (지역, 성별 숨김)
+                        display_cols = ['진행 그룹', '팀', '구장', '홀', '타순', '이름']
+                        st.dataframe(res[display_cols], use_container_width=True)
                         
-                        # 👀 불러온 명단을 눈으로 직접 확인할 수 있는 기능 추가
-                        with st.expander("👉 여기를 눌러 불러온 전체 선수 명단을 확인하세요"):
-                            st.dataframe(df_clean, use_container_width=True)
-                        
-                        if st.button(f"🚀 {m_type} 대진표 생성 실행"):
-                            res, t_cnt, order_stats = assign_teams_and_orders(df_clean, h_cnt, p_cnt, m_type)
-                            
-                            st.subheader(f"✅ {m_type} 편성 완료 (총 {t_cnt}개 조)")
-                            st.dataframe(res, use_container_width=True)
-                            
-                            if m_type == "단체전":
-                                st.markdown("---")
-                                st.subheader("📊 단체전 타순 순환 배치 검증 보고서")
-                                order_df = pd.DataFrame(order_stats).T.fillna(0).astype(int)
-                                order_df.columns = [f"{i}번 타순" for i in order_df.columns]
-                                st.dataframe(order_df, use_container_width=True)
-                            
-                            print_excel = create_print_excel(res, m_type, h_cnt)
-                            st.download_button(
-                                label="📥 인쇄용 공식 대진표 다운로드", 
-                                data=print_excel, 
-                                file_name=f"{m_type}_최종_대진표.xlsx"
-                            )
+                        print_excel = create_print_excel(res, m_type, h_cnt)
+                        st.download_button(
+                            label="📥 인쇄용 공식 대진표 다운로드", 
+                            data=print_excel, 
+                            file_name=f"{m_type}_최종_대진표.xlsx"
+                        )
                         
             except Exception as e:
                 st.error(f"엑셀 파일을 처리하는 도중 문제가 발생했습니다: {e}")
