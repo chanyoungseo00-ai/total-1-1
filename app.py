@@ -177,7 +177,7 @@ try:
     mode = st.sidebar.radio("작업 선택", ["대진표 편성", "대회 채점"])
 
     if mode == "대진표 편성":
-        st.title("⛳ 대진표 자동 편성")
+        st.title("⛳ 대진표 자동 편성 (엄격 명단 스캐너)")
         m_type = st.sidebar.radio("편성 부문", ["개인전", "단체전"])
         h_cnt = st.sidebar.radio("출발홀 수", [6, 7, 8], index=2)
         p_cnt = st.sidebar.radio("조당 인원", [6, 7, 8], index=0)
@@ -216,32 +216,31 @@ try:
                     if '클럽' in df_raw.columns: df_raw = df_raw.rename(columns={'클럽': '지역'})
                     if '남여' in df_raw.columns: df_raw = df_raw.rename(columns={'남여': '성별'})
                     
-                    if '이름' not in df_raw.columns:
-                        st.error("❌ [이름] 열을 찾을 수 없습니다.")
+                    if '이름' not in df_raw.columns or '지역' not in df_raw.columns:
+                        st.error("❌ 엑셀 파일에 [이름] 열과 [지역(소속)] 열이 모두 있어야 합니다.")
                     else:
-                        # 💡 [핵심 해결] 빈 줄을 지우기 '전'에 지역 먼저 쭉 채워넣기!!!
-                        if '지역' in df_raw.columns:
-                            # 완전 빈칸이나 띄어쓰기만 있는 칸을 '결측치'로 변환
-                            df_raw['지역'] = df_raw['지역'].replace(r'^\s*$', np.nan, regex=True)
-                            # 위에서 아래로 빈칸 덮어쓰기 (당겨채우기)
-                            df_raw['지역'] = df_raw['지역'].ffill().fillna('미기재')
-                        else:
-                            df_raw['지역'] = '미기재'
-                            
-                        if '성별' not in df_raw.columns: df_raw['성별'] = '남'
-                            
-                        # 지역을 완벽하게 채웠으니, 이제 안심하고 이름 없는 유령 행 삭제
-                        df_raw['이름'] = df_raw['이름'].astype(str).str.strip()
-                        valid_names = df_raw['이름']
-                        df_clean = df_raw[(valid_names != 'nan') & (valid_names != 'None') & (valid_names != '') & (valid_names != 'NaN')].copy()
+                        # 💡 [핵심 해결] 억지로 당겨오기(ffill) 전면 폐지! 
+                        # 지역 칸의 빈칸, 띄어쓰기 찌꺼기 등을 모두 완벽한 '결측치(nan)'로 만듦
+                        df_raw['지역'] = df_raw['지역'].astype(str).str.strip()
+                        df_raw['지역'] = df_raw['지역'].replace(r'^\s*$', np.nan, regex=True)
+                        df_raw['지역'] = df_raw['지역'].replace(['nan', 'None', 'NaN'], np.nan)
                         
+                        # 이름 칸의 빈칸, 찌꺼기 처리
+                        df_raw['이름'] = df_raw['이름'].astype(str).str.strip()
+                        df_raw['이름'] = df_raw['이름'].replace(r'^\s*$', np.nan, regex=True)
+                        df_raw['이름'] = df_raw['이름'].replace(['nan', 'None', 'NaN'], np.nan)
+                            
+                        # 💡 오직 [지역]과 [이름]이 둘 다 명확하게 타이핑되어 있는 진짜 사람만 남김!
+                        df_clean = df_raw.dropna(subset=['지역', '이름']).copy()
+                        
+                        if '성별' not in df_clean.columns: df_clean['성별'] = '남'
                         df_clean['성별'] = df_clean['성별'].fillna('남')
                         
                         df_clean = df_clean[['지역', '이름', '성별']]
                         
-                        st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 누락 없이 완벽하게 불러왔습니다!")
+                        st.success(f"🎉 숨겨진 오류 데이터 차단 완료! 총 **{len(df_clean)}명**의 선수 명단만 정확하게 불러왔습니다.")
                         
-                        with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요 (지역 누락 점검)"):
+                        with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요 (유령 인원 검증)"):
                             st.dataframe(df_clean[['지역', '이름']].reset_index(drop=True), use_container_width=True)
                         
                         if st.button(f"🚀 {m_type} 대진표 생성 실행"):
