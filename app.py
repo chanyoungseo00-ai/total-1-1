@@ -177,7 +177,7 @@ try:
     mode = st.sidebar.radio("작업 선택", ["대진표 편성", "대회 채점"])
 
     if mode == "대진표 편성":
-        st.title("⛳ 대진표 자동 편성 (명단 스캐너 적용)")
+        st.title("⛳ 대진표 자동 편성")
         m_type = st.sidebar.radio("편성 부문", ["개인전", "단체전"])
         h_cnt = st.sidebar.radio("출발홀 수", [6, 7, 8], index=2)
         p_cnt = st.sidebar.radio("조당 인원", [6, 7, 8], index=0)
@@ -192,7 +192,6 @@ try:
                 
                 df_raw = pd.read_excel(up_file, sheet_name=selected_sheet, header=None)
                 
-                # 💡 [엄격한 스캐너] 이름/성명 열 제목 찾기
                 header_idx = -1
                 
                 for i, row in df_raw.iterrows():
@@ -202,17 +201,14 @@ try:
                         break
                 
                 if header_idx == -1:
-                    st.error("❌ 선택하신 시트에서 [이름] 또는 [성명] 항목을 찾을 수 없습니다. 엑셀 파일의 제목줄을 확인해 주세요.")
+                    st.error("❌ 선택하신 시트에서 [이름] 또는 [성명] 항목을 찾을 수 없습니다.")
                 else:
-                    # 열 제목 깔끔하게 정리
                     raw_cols = df_raw.iloc[header_idx].astype(str).str.replace(" ", "").str.replace("\n", "")
                     df_raw.columns = raw_cols
                     df_raw = df_raw.iloc[header_idx+1:].reset_index(drop=True)
                     
-                    # 중복 컬럼명 제거 (오류 방지)
                     df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
                     
-                    # 제목 통일 (성명 -> 이름, 소속 -> 지역)
                     if '성명' in df_raw.columns: df_raw = df_raw.rename(columns={'성명': '이름'})
                     if '선수명' in df_raw.columns: df_raw = df_raw.rename(columns={'선수명': '이름'})
                     if '소속' in df_raw.columns: df_raw = df_raw.rename(columns={'소속': '지역'})
@@ -223,38 +219,38 @@ try:
                     if '이름' not in df_raw.columns:
                         st.error("❌ [이름] 열을 찾을 수 없습니다.")
                     else:
-                        # 💡 [핵심] 이름 없는 빈 줄 완벽 제거
-                        df_raw['이름'] = df_raw['이름'].astype(str).str.strip()
-                        df_clean = df_raw[~df_raw['이름'].isin(['nan', 'None', '', 'NaN'])].copy()
-                        
-                        # 지역 가져오기 (병합 셀 대비 앞사람 지역 복사, 아예 없으면 미기재)
-                        if '지역' in df_clean.columns:
-                            df_clean['지역'] = df_clean['지역'].ffill().fillna('미기재')
+                        # 💡 [핵심 해결] 빈 줄을 지우기 '전'에 지역 먼저 쭉 채워넣기!!!
+                        if '지역' in df_raw.columns:
+                            # 완전 빈칸이나 띄어쓰기만 있는 칸을 '결측치'로 변환
+                            df_raw['지역'] = df_raw['지역'].replace(r'^\s*$', np.nan, regex=True)
+                            # 위에서 아래로 빈칸 덮어쓰기 (당겨채우기)
+                            df_raw['지역'] = df_raw['지역'].ffill().fillna('미기재')
                         else:
-                            df_clean['지역'] = '미기재'
+                            df_raw['지역'] = '미기재'
                             
-                        # 성별 가져오기 (없으면 남자로 기본 지정)
-                        if '성별' not in df_clean.columns:
-                            df_clean['성별'] = '남'
+                        if '성별' not in df_raw.columns: df_raw['성별'] = '남'
+                            
+                        # 지역을 완벽하게 채웠으니, 이제 안심하고 이름 없는 유령 행 삭제
+                        df_raw['이름'] = df_raw['이름'].astype(str).str.strip()
+                        valid_names = df_raw['이름']
+                        df_clean = df_raw[(valid_names != 'nan') & (valid_names != 'None') & (valid_names != '') & (valid_names != 'NaN')].copy()
+                        
                         df_clean['성별'] = df_clean['성별'].fillna('남')
                         
                         df_clean = df_clean[['지역', '이름', '성별']]
                         
                         st.success(f"🎉 총 **{len(df_clean)}명**의 선수 명단을 누락 없이 완벽하게 불러왔습니다!")
                         
-                        # 👀 불러온 명단을 눈으로 직접 확인 (지역과 이름 나란히 표시)
-                        with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요"):
+                        with st.expander("👉 여기를 눌러 불러온 전체 명단을 확인하세요 (지역 누락 점검)"):
                             st.dataframe(df_clean[['지역', '이름']].reset_index(drop=True), use_container_width=True)
                         
                         if st.button(f"🚀 {m_type} 대진표 생성 실행"):
                             res, t_cnt, order_stats = assign_teams_and_orders(df_clean, h_cnt, p_cnt, m_type)
                             
-                            # 성별은 안 보이게 숨김 처리 (지역과 이름만 보임)
                             res['성별'] = ""
                             
                             st.subheader(f"✅ {m_type} 편성 완료 (총 {t_cnt}개 조)")
                             
-                            # 화면에 보여줄 컬럼 순서 지정 (지역 포함)
                             display_cols = ['진행 그룹', '팀', '구장', '홀', '타순', '지역', '이름']
                             st.dataframe(res[display_cols], use_container_width=True)
                             
