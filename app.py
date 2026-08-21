@@ -7,7 +7,7 @@ from collections import defaultdict
 
 st.set_page_config(page_title="그라운드골프 대진표 시스템", layout="wide")
 
-FIELDS = ['청', '백', '홍', '황']  # 구장 목록 (편성 / 대진표 출력 / 채점표 출력 공용 상수)
+FIELDS = ['청', '백', '홍', '황']  # 구장 목록 (편성 / 대진표 출력 공용 상수)
 
 # ==========================================
 # [모듈 1] 데이터 스캔 및 정제 엔진
@@ -169,7 +169,7 @@ def create_print_excel(df, holes_cnt):
     return output.getvalue()
 
 # ==========================================
-# [모듈 4] 심판용 채점표 엑셀 자동 생성
+# [모듈 4] 심판용 채점표 + 본부석 순위표 통합 엑셀 생성
 # ==========================================
 def create_scoring_sheet_excel(df):
     output = io.BytesIO()
@@ -183,6 +183,7 @@ def create_scoring_sheet_excel(df):
             if sub_df.empty:
                 continue
 
+            # --- 1. 심판용 채점표 시트 생성 ---
             # 조 번호(숫자)와 타순으로 정렬 (expand=False로 Series 반환을 명시해 버전 간 동작 차이 방지)
             sub_df['team_num'] = sub_df['팀'].str.extract(r'(\d+)', expand=False).astype(int)
             sub_df = sub_df.sort_values(by=['team_num', '타순'])
@@ -193,13 +194,11 @@ def create_scoring_sheet_excel(df):
             ws.set_column('D:E', 12)  # 소속, 성명
             ws.set_column('F:N', 8)   # 점수칸
 
-            # 채점표 헤더 (2단 구조: 경기 구분 + 세부 항목)
             ws.merge_range('A1:A2', '경기/구장', head_fmt)
             ws.merge_range('B1:B2', '조', head_fmt)
             ws.merge_range('C1:C2', '타순', head_fmt)
             ws.merge_range('D1:D2', '소속', head_fmt)
             ws.merge_range('E1:E2', '성명', head_fmt)
-
             ws.merge_range('F1:H1', '1차전', head_fmt)
             ws.merge_range('I1:K1', '2차전', head_fmt)
             ws.merge_range('L1:N1', '계', head_fmt)
@@ -211,10 +210,8 @@ def create_scoring_sheet_excel(df):
 
             row = 2
             current_team = None
-
             for _, p in sub_df.iterrows():
                 t_num = p['team_num']
-
                 # 조가 바뀔 때만 경기/구장/조 정보 표기 (가독성)
                 if t_num != current_team:
                     match_info = f"{p['경기']} {p['구장']}{p['홀']}홀"
@@ -228,12 +225,45 @@ def create_scoring_sheet_excel(df):
                 ws.write(row, 2, p['타순'], cell_fmt)
                 ws.write(row, 3, p['지역'], cell_fmt)
                 ws.write(row, 4, p['이름'], cell_fmt)
-
                 # 심판이 수기로 적을 점수칸은 공란으로 생성
                 for c in range(5, 14):
                     ws.write(row, c, "", cell_fmt)
-
                 row += 1
+
+            # --- 2. 본부석 집계용 순위표 시트 생성 ---
+            ws_rank = wb.add_worksheet(f"{match_type}전 순위표")
+            if match_type == '단체':
+                ws_rank.set_column('A:A', 8)
+                ws_rank.set_column('B:B', 18)
+                ws_rank.set_column('C:E', 10)
+                heads = ['순위', '소속(지역)', '총타수', '2타수', '홀인원']
+                for c, text in enumerate(heads):
+                    ws_rank.write(0, c, text, head_fmt)
+
+                # 지역(소속)만 뽑아서 가나다순으로 나열
+                for r_idx, region in enumerate(sorted(sub_df['지역'].unique()), start=1):
+                    ws_rank.write(r_idx, 0, "", cell_fmt)
+                    ws_rank.write(r_idx, 1, region, cell_fmt)
+                    ws_rank.write(r_idx, 2, "", cell_fmt)
+                    ws_rank.write(r_idx, 3, "", cell_fmt)
+                    ws_rank.write(r_idx, 4, "", cell_fmt)
+            else:
+                ws_rank.set_column('A:A', 8)
+                ws_rank.set_column('B:C', 15)
+                ws_rank.set_column('D:F', 10)
+                heads = ['순위', '소속(지역)', '성명', '총타수', '2타수', '홀인원']
+                for c, text in enumerate(heads):
+                    ws_rank.write(0, c, text, head_fmt)
+
+                # 개인전 참가자 전원을 소속->이름 순으로 정렬하여 나열
+                sorted_sub = sub_df.sort_values(by=['지역', '이름'])
+                for r_idx, p in enumerate(sorted_sub.itertuples(), start=1):
+                    ws_rank.write(r_idx, 0, "", cell_fmt)
+                    ws_rank.write(r_idx, 1, p.지역, cell_fmt)
+                    ws_rank.write(r_idx, 2, p.이름, cell_fmt)
+                    ws_rank.write(r_idx, 3, "", cell_fmt)
+                    ws_rank.write(r_idx, 4, "", cell_fmt)
+                    ws_rank.write(r_idx, 5, "", cell_fmt)
 
     return output.getvalue()
 
@@ -339,7 +369,7 @@ try:
             with dl_col1:
                 st.download_button("🖨️ 인쇄용 대진표", data=create_print_excel(res, h_cnt), file_name="최종_대진표.xlsx", use_container_width=True)
             with dl_col2:
-                st.download_button("📊 심판용 채점표", data=create_scoring_sheet_excel(res), file_name="심판용_채점표.xlsx", use_container_width=True)
+                st.download_button("📊 채점표 & 순위표", data=create_scoring_sheet_excel(res), file_name="채점표_및_순위표.xlsx", use_container_width=True)
             with dl_col3:
                 buf = io.BytesIO()
                 res_show.to_excel(buf, index=False, sheet_name="검증용_명단")
