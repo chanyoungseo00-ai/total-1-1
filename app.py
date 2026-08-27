@@ -4,10 +4,12 @@ import numpy as np
 import io
 import traceback
 from collections import defaultdict
+from xlsxwriter.utility import xl_col_to_name
 
 st.set_page_config(page_title="그라운드골프 대진표 시스템", layout="wide")
 
 FIELDS = ['청', '백', '홍', '황']  # 구장 목록
+NUM_DAYS = 3  # 대회 운영 가능 일수 (대진표는 동일하게 유지, 채점만 일차별로 누적 집계)
 
 # ==========================================
 # [모듈 1] 데이터 스캔 및 정제 엔진
@@ -40,7 +42,7 @@ def process_raw_data(df_raw, default_category):
     return df_clean[['지역', '이름', '성별', '부문', '고유번호']], ""
 
 # ==========================================
-# [모듈 2] 대진표 편성 엔진
+# [모듈 2] 대진표 편성 엔진 (일자와 무관하게 1회만 생성 → 그대로 재사용)
 # ==========================================
 def assign_teams_and_orders(df, holes_per_field=8, p_cnt_indiv=6, p_cnt_team=6, max_rounds=3):
     players = df.to_dict('records')
@@ -126,9 +128,10 @@ def assign_teams_and_orders(df, holes_per_field=8, p_cnt_indiv=6, p_cnt_team=6, 
     return res_df, len(teams), max_limit
 
 # ==========================================
-# [모듈 3] 통합 결과 엑셀 생성 (명단 + 대진표 + 채점표/순위표/집계 전부 한 파일)
+# [모듈 3] 통합 결과 엑셀 생성
+#  - 명단 / 대진표(1회만 생성, 일자 무관 재사용) / 일자별 채점표 / 순위표 / 지역별 집계
 # ==========================================
-def create_combined_excel(res, holes_cnt):
+def create_combined_excel(res, holes_cnt, num_days=NUM_DAYS):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         wb = writer.book
@@ -137,6 +140,7 @@ def create_combined_excel(res, holes_cnt):
         num_fmt = wb.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'num_format': '0'})
         rank_fmt = wb.add_format({'bold': True, 'border': 1, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#FFF2CC'})
         title_fmt = wb.add_format({'bold': True, 'font_size': 14})
+        note_fmt = wb.add_format({'italic': True, 'font_size': 10, 'font_color': '#666666'})
 
         # --- 1. 단체전 명단 / 개인전 명단 (고유번호 + 배정정보 한 셀 표기) ---
         for match_type in ['단체', '개인']:
@@ -160,7 +164,7 @@ def create_combined_excel(res, holes_cnt):
                 ws_list.write(r_idx, 3, p.성별, cell_fmt)
                 ws_list.write(r_idx, 4, assign_info, cell_fmt)
 
-        # --- 2. 인쇄용 대진표 ---
+        # --- 2. 인쇄용 대진표 (일자가 늘어나도 이 시트 그대로 재사용) ---
         for r_name in sorted(res['경기'].unique()):
             r_df = res[res['경기'] == r_name]
             for f_name in FIELDS:
@@ -171,6 +175,7 @@ def create_combined_excel(res, holes_cnt):
                 ws = wb.add_worksheet(f"{r_name}_{f_name}구장")
                 ws.set_column('A:O', 11)
                 ws.write(0, 0, f"제18회 대한체육회장배 대진표 ({r_name} {f_name}구장)", title_fmt)
+                ws.write(1, 0, f"※ 본 대진표는 1~{num_days}일차 동일하게 적용됩니다.", note_fmt)
 
                 row = 3
                 for h in range(1, holes_cnt + 1, 2):
@@ -191,43 +196,51 @@ def create_combined_excel(res, holes_cnt):
                             ws.write_row(row + i, 8, [h + 1 if i == 0 else "", p['타순'], p['부문'], p['지역'], p['이름'], p['성별'], ""], cell_fmt)
                     row += max(len(h1_data), len(h2_data), 6) + 1
 
-        # --- 3. 채점표 + 순위표 + 지역별 집계 (고유번호 기반 매칭) ---
+        # --- 3. 채점표(일자별 입력 + 자동 합계) + 순위표 + 지역별 집계 ---
         for match_type in ['단체', '개인']:
             sub_df = res[res['부문'].str.contains(match_type, na=False)].copy()
             if sub_df.empty:
                 continue
 
-            # 조 번호(숫자)와 타순으로 정렬
             sub_df['team_num'] = sub_df['팀'].str.extract(r'(\d+)', expand=False).astype(int)
             sub_df = sub_df.sort_values(by=['team_num', '타순'])
 
             sheet_score = f"{match_type}전 채점표"
             ws = wb.add_worksheet(sheet_score)
+
+            fixed_cols = 5           # 일시,조,타순,소속,성명
+            block_w = 3               # 총타수,2타수,홀인원
+            total_start = fixed_cols + num_days * block_w   # "합계" 블록 시작 컬럼
+            uid_col = total_start + block_w                  # 고유번호 컬럼
+
             ws.set_column('A:A', 14)
             ws.set_column('B:C', 6)
             ws.set_column('D:E', 12)
-            ws.set_column('F:N', 8)
-            ws.set_column('O:O', 10)
+            ws.set_column(f"{xl_col_to_name(fixed_cols)}:{xl_col_to_name(uid_col - 1)}", 8)
+            ws.set_column(f"{xl_col_to_name(uid_col)}:{xl_col_to_name(uid_col)}", 10)
 
-            ws.merge_range('A1:A2', '일시(경기)', head_fmt)
-            ws.merge_range('B1:B2', '조', head_fmt)
-            ws.merge_range('C1:C2', '타순', head_fmt)
-            ws.merge_range('D1:D2', '소속', head_fmt)
-            ws.merge_range('E1:E2', '성명', head_fmt)
-            ws.merge_range('F1:H1', '1차전', head_fmt)
-            ws.merge_range('I1:K1', '2차전', head_fmt)
-            ws.merge_range('L1:N1', '계', head_fmt)
-            ws.merge_range('O1:O2', '고유번호', head_fmt)
-
-            for col_start in [5, 8, 11]:
-                ws.write(1, col_start, '총타수', head_fmt)
-                ws.write(1, col_start + 1, '2타수', head_fmt)
-                ws.write(1, col_start + 2, '홀인원', head_fmt)
+            ws.merge_range(0, 0, 1, 0, '일시(경기)', head_fmt)
+            ws.merge_range(0, 1, 1, 1, '조', head_fmt)
+            ws.merge_range(0, 2, 1, 2, '타순', head_fmt)
+            ws.merge_range(0, 3, 1, 3, '소속', head_fmt)
+            ws.merge_range(0, 4, 1, 4, '성명', head_fmt)
+            for d in range(1, num_days + 1):
+                start = fixed_cols + (d - 1) * block_w
+                ws.merge_range(0, start, 0, start + block_w - 1, f'{d}일차', head_fmt)
+                ws.write(1, start, '총타수', head_fmt)
+                ws.write(1, start + 1, '2타수', head_fmt)
+                ws.write(1, start + 2, '홀인원', head_fmt)
+            ws.merge_range(0, total_start, 0, total_start + block_w - 1, '합계', head_fmt)
+            ws.write(1, total_start, '총타수', head_fmt)
+            ws.write(1, total_start + 1, '2타수', head_fmt)
+            ws.write(1, total_start + 2, '홀인원', head_fmt)
+            ws.merge_range(0, uid_col, 1, uid_col, '고유번호', head_fmt)
 
             row = 2
             current_team = None
             for _, p in sub_df.iterrows():
                 t_num = p['team_num']
+                # 조가 바뀔 때만 경기/구장/조 정보 표기 (가독성)
                 if t_num != current_team:
                     match_info = f"{p['경기']} {p['구장']}{p['홀']}홀"
                     ws.write(row, 0, match_info, cell_fmt)
@@ -241,17 +254,22 @@ def create_combined_excel(res, holes_cnt):
                 ws.write(row, 3, p['지역'], cell_fmt)
                 ws.write(row, 4, p['이름'], cell_fmt)
 
-                # 심판이 수기로 적을 입력칸(1차전/2차전)만 공란으로 생성
-                for c in range(5, 11):
+                # 심판이 일자별로 수기 입력할 칸은 공란으로 생성
+                for c in range(fixed_cols, total_start):
                     ws.write(row, c, "", num_fmt)
 
-                # "계" 칸은 1차전+2차전 합계를 자동 계산
+                # "합계"는 입력된 일자만큼만 자동으로 누적 (아직 안 온 날은 무시)
                 erow = row + 1
-                ws.write_formula(row, 11, f'=IF(COUNT(F{erow},I{erow})>0, SUM(F{erow},I{erow}), "")', num_fmt)
-                ws.write_formula(row, 12, f'=IF(COUNT(G{erow},J{erow})>0, SUM(G{erow},J{erow}), "")', num_fmt)
-                ws.write_formula(row, 13, f'=IF(COUNT(H{erow},K{erow})>0, SUM(H{erow},K{erow}), "")', num_fmt)
-                ws.write(row, 14, p['고유번호'], cell_fmt)  # 고유번호(매칭용 + 참고용)
+                for k in range(block_w):  # 0=총타수,1=2타수,2=홀인원
+                    day_cols = [fixed_cols + d * block_w + k for d in range(num_days)]
+                    day_refs = ",".join(f"{xl_col_to_name(c)}{erow}" for c in day_cols)
+                    ws.write_formula(row, total_start + k, f'=IF(COUNT({day_refs})>0, SUM({day_refs}), "")', num_fmt)
+
+                ws.write(row, uid_col, p['고유번호'], cell_fmt)  # 고유번호(매칭용 + 참고용)
                 row += 1
+
+            total_letters = [xl_col_to_name(total_start + k) for k in range(block_w)]  # [총타수, 2타수, 홀인원] 합계열
+            uid_letter = xl_col_to_name(uid_col)
 
             sheet_rank = f"{match_type}전 순위표"
             ws_rank = wb.add_worksheet(sheet_rank)
@@ -272,12 +290,12 @@ def create_combined_excel(res, holes_cnt):
                     erow = r_idx + 1
                     ws_rank.write(r_idx, 1, region, cell_fmt)
 
-                    # 지역(소속) 단위 집계는 여러 선수를 묶는 것이 목적이므로 소속명으로 매칭
-                    ws_rank.write_formula(r_idx, 2, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!$L:$L)", num_fmt)
-                    ws_rank.write_formula(r_idx, 3, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!$M:$M)", num_fmt)
-                    ws_rank.write_formula(r_idx, 4, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!$N:$N)", num_fmt)
+                    # 지역(소속) 단위 집계는 여러 선수를 묶는 게 목적이므로 소속명으로 매칭 (변경 없음)
+                    ws_rank.write_formula(r_idx, 2, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!${total_letters[0]}:${total_letters[0]})", num_fmt)
+                    ws_rank.write_formula(r_idx, 3, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!${total_letters[1]}:${total_letters[1]})", num_fmt)
+                    ws_rank.write_formula(r_idx, 4, f"=SUMIF('{sheet_score}'!$D:$D, B{erow}, '{sheet_score}'!${total_letters[2]}:${total_letters[2]})", num_fmt)
 
-                    # 순위: 총타수 오름차순 → 동점시 홀인원 내림차순 → 2타수 내림차순
+                    # 순위: 총타수(전체 일자 합계) 오름차순 → 동점시 홀인원 내림차순 → 2타수 내림차순
                     multi_condition_formula = (
                         f'=IF(C{erow}=0, "", 1 + COUNTIFS($C$2:$C${max_row}, "<"&C{erow}) '
                         f'+ COUNTIFS($C$2:$C${max_row}, C{erow}, $E$2:$E${max_row}, ">"&E{erow}) '
@@ -285,7 +303,7 @@ def create_combined_excel(res, holes_cnt):
                     )
                     ws_rank.write_formula(r_idx, 0, multi_condition_formula, rank_fmt)
 
-                # --- 단체전 지역별 상세 집계표 시트 (선수 명단 묶음표) ---
+                # --- 단체전 지역별 상세 집계표 시트 ---
                 sheet_region = "단체전 지역별 집계"
                 ws_reg = wb.add_worksheet(sheet_region)
                 ws_reg.set_column('A:B', 15)
@@ -308,9 +326,9 @@ def create_combined_excel(res, holes_cnt):
                     ws_reg.write(r_idx, 3, p.타순, cell_fmt)
 
                     # 개인 총타수: 이름/지역이 아닌 고유번호로 매칭 (동명이인+동일지역이어도 정확히 구분됨)
-                    ws_reg.write_formula(r_idx, 4, f"=SUMIFS('{sheet_score}'!$L:$L, '{sheet_score}'!$O:$O, {uid})", num_fmt)
-                    # 지역 총합계: 해당 지역 선수 전원의 합
-                    ws_reg.write_formula(r_idx, 5, f"=SUMIF('{sheet_score}'!$D:$D, A{erow}, '{sheet_score}'!$L:$L)", rank_fmt)
+                    ws_reg.write_formula(r_idx, 4, f"=SUMIFS('{sheet_score}'!${total_letters[0]}:${total_letters[0]}, '{sheet_score}'!${uid_letter}:${uid_letter}, {uid})", num_fmt)
+                    # 지역 총합계: 해당 지역 선수 전원의 (전체 일자) 합
+                    ws_reg.write_formula(r_idx, 5, f"=SUMIF('{sheet_score}'!$D:$D, A{erow}, '{sheet_score}'!${total_letters[0]}:${total_letters[0]})", rank_fmt)
                     ws_reg.write(r_idx, 6, uid, cell_fmt)
 
             else:
@@ -333,12 +351,12 @@ def create_combined_excel(res, holes_cnt):
                     ws_rank.write(r_idx, 2, p.이름, cell_fmt)
 
                     # 개인 매칭도 이름/지역이 아닌 고유번호로 매칭
-                    ws_rank.write_formula(r_idx, 3, f"=SUMIFS('{sheet_score}'!$L:$L, '{sheet_score}'!$O:$O, {uid})", num_fmt)
-                    ws_rank.write_formula(r_idx, 4, f"=SUMIFS('{sheet_score}'!$M:$M, '{sheet_score}'!$O:$O, {uid})", num_fmt)
-                    ws_rank.write_formula(r_idx, 5, f"=SUMIFS('{sheet_score}'!$N:$N, '{sheet_score}'!$O:$O, {uid})", num_fmt)
+                    ws_rank.write_formula(r_idx, 3, f"=SUMIFS('{sheet_score}'!${total_letters[0]}:${total_letters[0]}, '{sheet_score}'!${uid_letter}:${uid_letter}, {uid})", num_fmt)
+                    ws_rank.write_formula(r_idx, 4, f"=SUMIFS('{sheet_score}'!${total_letters[1]}:${total_letters[1]}, '{sheet_score}'!${uid_letter}:${uid_letter}, {uid})", num_fmt)
+                    ws_rank.write_formula(r_idx, 5, f"=SUMIFS('{sheet_score}'!${total_letters[2]}:${total_letters[2]}, '{sheet_score}'!${uid_letter}:${uid_letter}, {uid})", num_fmt)
                     ws_rank.write(r_idx, 6, uid, cell_fmt)
 
-                    # 순위: 총타수 오름차순 → 동점시 홀인원 내림차순 → 2타수 내림차순
+                    # 순위: 총타수(전체 일자 합계) 오름차순 → 동점시 홀인원 내림차순 → 2타수 내림차순
                     multi_condition_formula = (
                         f'=IF(D{erow}=0, "", 1 + COUNTIFS($D$2:$D${max_row}, "<"&D{erow}) '
                         f'+ COUNTIFS($D$2:$D${max_row}, D{erow}, $F$2:$F${max_row}, ">"&F{erow}) '
@@ -398,7 +416,7 @@ try:
 
     df_clean = None
 
-    st.info(f"💡 **단체전 명단**과 **개인전 명단**을 각각 입력해 주세요. (구장별로 순차적으로 채워나가며, **[{match_format}]**에 따라 최대 {h_cnt * len(FIELDS) * max_r}조로 편성 제한됩니다.)")
+    st.info(f"💡 **단체전 명단**과 **개인전 명단**을 각각 입력해 주세요. (구장별로 순차적으로 채워나가며, **[{match_format}]**에 따라 최대 {h_cnt * len(FIELDS) * max_r}조로 편성 제한됩니다. 대진표는 **1~{NUM_DAYS}일차 동일하게** 재사용되고, 채점표만 일자별로 누적됩니다.)")
     col1, col2 = st.columns(2)
     with col1:
         df_raw_team = load_data_ui("단체전", data_source)
@@ -442,9 +460,9 @@ try:
             st.dataframe(res_show, use_container_width=True)
 
             st.write("#### 💾 결과물 다운로드")
-            combined_xl = create_combined_excel(res, h_cnt)
+            combined_xl = create_combined_excel(res, h_cnt, NUM_DAYS)
             st.download_button(
-                "📥 전체 결과 다운로드 (명단·대진표·채점표·순위표 통합)",
+                f"📥 전체 결과 다운로드 (명단·대진표·{NUM_DAYS}일차 채점표·순위표 통합)",
                 data=combined_xl,
                 file_name="그라운드골프_통합결과.xlsx",
                 use_container_width=True,
